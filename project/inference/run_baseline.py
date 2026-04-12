@@ -51,6 +51,43 @@ def load_all_models(args):
     pipe.set_ip_adapter_scale(args.scale)
     
     return pipe, feature_extractor, device
+def compare_scales(pipe, device, reference_path, out_dir, scales=[0.3, 0.5, 0.7, 1.0]):
+    """
+    对比不同 IP-Adapter scale 的效果，专为 Midway 报告生成对比图素材
+    """
+    print(f"\n📊 开始生成 Scale 对比图，测试范围: {scales}")
+    comp_dir = Path(out_dir) / "scale_comparison"
+    comp_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_image = Image.open(reference_path).convert("RGB")
+    # 固定使用 happy 情绪作为测试基准
+    prompt = EMOTION_PROMPTS["happy"]
+
+    for scale in scales:
+        print(f"  > 正在测试 Scale = {scale} ...")
+        
+        # 1. 动态设置当前循环的 scale
+        pipe.set_ip_adapter_scale(scale)
+
+        # 2. 生成图片（必须固定 seed，确保唯一的变量是 scale）
+        generator = torch.Generator(device=device).manual_seed(42)
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=NEGATIVE_PROMPT,
+            ip_adapter_image=[raw_image], # 继续使用安全的列表封装
+            num_inference_steps=30,
+            guidance_scale=7.5,
+            generator=generator,
+        ).images[0]
+
+        # 3. 保存图片
+        save_path = comp_dir / f"scale_{scale:.1f}.jpg"
+        image.save(save_path, quality=95)
+        print(f"    ✅ done")
+
+    # 测试结束后，恢复默认的 scale (0.7)，以免影响后续其他任务
+    pipe.set_ip_adapter_scale(0.7)
+    print(f"✨ Scale 对比图已保存在: {comp_dir}/\n")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -59,6 +96,7 @@ def main():
     parser.add_argument("--scale",       type=float, default=0.7)
     parser.add_argument("--sd-path",     default="models/sd-v1-5")
     parser.add_argument("--ip-repo-path", default="models/ip-adapter")
+    parser.add_argument("--compare-scales", action="store_true", help="是否运行 Scale 权重对比测试")
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -67,6 +105,13 @@ def main():
     pipe, feature_extractor, device = load_all_models(args)
     
     ref_path = Path(args.reference)
+    if not ref_path.exists():
+        print(f"❌ 找不到图片: {ref_path}")
+        return
+
+    if args.compare_scales:
+        compare_scales(pipe, device, ref_path, out_dir)
+        # 如果只想跑对比图，跑完可以直接 return，或者继续往下跑基础表情测试
     raw_image = Image.open(ref_path).convert("RGB")
 
     print(f"🚀 开始推理: {ref_path.name}")
@@ -89,6 +134,7 @@ def main():
         save_path = out_dir / f"{ref_path.stem}_{emotion}.jpg"
         image.save(save_path)
         print(f"    ✅ 已保存")
+
 
 if __name__ == "__main__":
     main()
