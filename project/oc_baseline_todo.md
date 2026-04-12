@@ -129,7 +129,7 @@ mkdir -p data/raw/character_sheet
 gallery-dl \
   --range 1-3000 \
   --directory data/raw/expression_sheet \
-  "https://safebooru.org/index.php?page=post&s=list&tags=expression_sheet"
+  "https://safebooru.org/index.php?page=post&s=list&tags=expressions+multiple_views"
 
 # 下载多视角设定图（后续视角实验用）
 gallery-dl \
