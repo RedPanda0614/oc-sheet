@@ -1,0 +1,15 @@
+torch==2.1.0
+torchvision
+diffusers==0.25.0
+transformers
+accelerate
+Pillow
+tqdm
+opencv-python
+numpy
+scikit-learn
+face-alignment
+insightface
+onnxruntime-gpu
+scipy
+matplotlib
