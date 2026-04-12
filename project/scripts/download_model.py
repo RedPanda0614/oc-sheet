@@ -14,7 +14,7 @@ def setup_models():
         snapshot_download(
             repo_id="runwayml/stable-diffusion-v1-5",
             local_dir=sd_path,
-            ignore_patterns=["*.msgpack", "*.ckpt", "*.safetensors"] # 优先用 diffusers 格式
+            ignore_patterns=["*.msgpack", "*.ckpt"] # 优先用 diffusers 格式
         )
     else:
         print("✅ SD v1.5 已存在")
