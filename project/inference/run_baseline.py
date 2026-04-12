@@ -1,16 +1,14 @@
 import argparse
 import os
-import sys
 import torch
 from pathlib import Path
 from PIL import Image
 from diffusers import StableDiffusionPipeline
-from transformers import CLIPVisionModelWithProjection
-os.environ["TRUST_REMOTE_CODE"] = "True"
-os.environ["TORCH_SKIP_CHECK_SAFE_SERIALIZATION"] = "True" # 绕过这个安全限制
+from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
+# 屏蔽安全警告和损坏检查
+os.environ["TORCH_SKIP_CHECK_SAFE_SERIALIZATION"] = "True"
 
-# ── 配置：情绪 Prompt 映射 ─────────────────────────────────────
 EMOTION_PROMPTS = {
     "happy":       "manga character, smiling, happy expression, 1girl, high quality",
     "sad":         "manga character, sad expression, teary eyes, 1girl, high quality",
@@ -20,37 +18,21 @@ EMOTION_PROMPTS = {
     "embarrassed": "manga character, embarrassed, blushing, 1girl, high quality",
 }
 
-NEGATIVE_PROMPT = (
-    "lowres, bad anatomy, bad hands, worst quality, blurry, "
-    "deformed, extra fingers, ugly, text, watermark"
-)
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("reference", help="参考人脸图片的路径")
-    p.add_argument("--output-dir",  default="results/baseline")
-    p.add_argument("--scale",       type=float, default=0.7, help="参考图强度 (0.5-0.8)")
-    p.add_argument("--steps",       type=int,   default=30)
-    p.add_argument("--sd-path",     default="models/sd-v1-5")
-    # 注意：这里的默认路径指向你克隆的 IP-Adapter 文件夹
-    p.add_argument("--ip-repo-path", default="models/ip-adapter")
-    return p.parse_args()
+NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, worst quality, blurry, deformed, ugly"
 
 def load_all_models(args):
-    """根据你的项目结构加载模型"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. 显式加载你本地的 Image Encoder (ViT-H/14)
-    # 路径通常在 IP-Adapter/models/image_encoder
-    image_encoder_path = os.path.join(args.ip_repo_path, "models", "image_encoder")
-    print(f"📦 正在加载 Image Encoder: {image_encoder_path}")
+    # 1. 加载图像编码器和预处理器
+    enc_path = os.path.join(args.ip_repo_path, "models", "image_encoder")
+    print(f"📦 加载 Image Encoder: {enc_path}")
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-        image_encoder_path,
-        torch_dtype=torch.float16
+        enc_path, torch_dtype=torch.float16
     ).to(device)
+    feature_extractor = CLIPImageProcessor.from_pretrained(enc_path)
 
-    # 2. 加载基础 SD v1.5
-    print(f"📦 正在加载 SD Pipeline: {args.sd_path}")
+    # 2. 加载 SD Pipeline
+    print(f"📦 加载 SD Pipeline: {args.sd_path}")
     pipe = StableDiffusionPipeline.from_pretrained(
         args.sd_path,
         image_encoder=image_encoder,
@@ -58,60 +40,55 @@ def load_all_models(args):
         safety_checker=None
     ).to(device)
 
-    # 3. 加载 IP-Adapter 权重
-    # 路径在 IP-Adapter/models/ip-adapter-plus_sd15.bin
-    print(f"⚓ 正在挂载 IP-Adapter Plus 权重...")
-    # 直接传入父目录，并明确指定子目录和文件名
+    # 3. 加载 IP-Adapter Plus
+    print(f"⚓ 挂载 IP-Adapter Plus...")
+    # 注意：这里直接传列表 [ref_image] 有时能解决元组报错
     pipe.load_ip_adapter(
         args.ip_repo_path, 
         subfolder="models", 
         weight_name="ip-adapter-plus_sd15.bin"
     )
     pipe.set_ip_adapter_scale(args.scale)
-
-    # 内存优化
-    pipe.enable_attention_slicing()
     
-    return pipe, device
+    return pipe, feature_extractor, device
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("reference")
+    parser.add_argument("--output-dir",  default="results/baseline")
+    parser.add_argument("--scale",       type=float, default=0.7)
+    parser.add_argument("--sd-path",     default="models/sd-v1-5")
+    parser.add_argument("--ip-repo-path", default="models/ip-adapter")
+    args = parser.parse_args()
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 加载模型
-    pipe, device = load_all_models(args)
-
-    # 处理参考图
+    pipe, feature_extractor, device = load_all_models(args)
+    
     ref_path = Path(args.reference)
-    if not ref_path.exists():
-        print(f"❌ 找不到图片: {ref_path}")
-        return
-    ref_image = Image.open(ref_path).convert("RGB")
+    raw_image = Image.open(ref_path).convert("RGB")
 
-    print(f"🚀 开始生成角色 {ref_path.stem} 的表情变体...")
+    print(f"🚀 开始推理: {ref_path.name}")
 
     for emotion, prompt in EMOTION_PROMPTS.items():
         print(f"  > 生成中: {emotion}")
         
-        # 生成图片
+        # 核心修正：使用列表包装原始 PIL 图片
+        # 在最新版 diffusers 中，对于 Plus 模型，传入 [PIL.Image] 
+        # 会触发正确的内部编码流程，避免产生空的元组分量
         image = pipe(
             prompt=prompt,
             negative_prompt=NEGATIVE_PROMPT,
-            ip_adapter_image=ref_image,
-            num_inference_steps=args.steps,
+            ip_adapter_image=[raw_image], # 重点：中括号包装单张图片
+            num_inference_steps=30,
             guidance_scale=7.5,
-            height=512,
-            width=512,
             generator=torch.Generator(device=device).manual_seed(42),
         ).images[0]
 
-        # 保存结果
         save_path = out_dir / f"{ref_path.stem}_{emotion}.jpg"
-        image.save(save_path, quality=95)
-        print(f"    ✅ 已保存: {save_path}")
-
-    print(f"\n✨ 完成！结果保存在: {out_dir}")
+        image.save(save_path)
+        print(f"    ✅ 已保存")
 
 if __name__ == "__main__":
     main()
