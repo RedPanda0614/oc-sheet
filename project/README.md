@@ -37,7 +37,10 @@ to new characters at inference time (prompt-only control).
 
 Train:
 ```bash
+pip install peft
+
 python scripts/train_lora_global.py \
+  --pretrained-model runwayml/stable-diffusion-v1-5 \
   --pairs-json data/lora/pairs/train.json \
   --output-dir results/lora_global \
   --max-steps 5000 \
@@ -47,6 +50,7 @@ python scripts/train_lora_global.py \
 Infer:
 ```bash
 python inference/run_lora_global.py \
+  --pretrained-model runwayml/stable-diffusion-v1-5 \
   --lora-dir results/lora_global \
   --reference data/processed/faces/sheet_00008__face00.jpg \
   --output-dir results/lora_global/outputs

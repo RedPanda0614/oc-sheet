@@ -26,7 +26,7 @@ NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, worst quality, blurry, deform
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--pretrained-model", default="models/sd-v1-5")
+    p.add_argument("--pretrained-model", default="runwayml/stable-diffusion-v1-5")
     p.add_argument("--lora-dir", required=True)
     p.add_argument("--reference", required=True, help="Reference image (optional for identity check)")
     p.add_argument("--output-dir", default="results/lora_global/outputs")
@@ -48,7 +48,7 @@ def main():
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         safety_checker=None,
     ).to(device)
-    pipe.unet.load_attn_procs(args.lora_dir)
+    pipe.load_lora_weights(args.lora_dir)
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     for emotion, emo_prompt in EMOTION_PROMPTS.items():

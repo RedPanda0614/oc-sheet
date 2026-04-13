@@ -1,9 +1,8 @@
 """
 Global LoRA training for expression control (all characters).
 
-Trains a single LoRA adapter on the full dataset with emotion-conditioned prompts.
-Note: This learns expression control in prompt space; it does NOT use reference images.
-For reference-guided control, use IP-Adapter fine-tuning.
+This script uses the PEFT-backed LoRA path supported by recent diffusers
+versions, which is more stable than manually constructing attention processors.
 """
 
 from __future__ import annotations
@@ -15,13 +14,10 @@ from pathlib import Path
 
 import torch
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
-from diffusers.loaders import AttnProcsLayers
-import inspect
-from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0, AttnProcessor2_0
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
 
@@ -37,7 +33,7 @@ EMOTION_PROMPTS = {
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--pretrained-model", default="models/sd-v1-5")
+    p.add_argument("--pretrained-model", default="runwayml/stable-diffusion-v1-5")
     p.add_argument("--pairs-json", default="data/lora/pairs/train.json")
     p.add_argument("--resolution", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=2)
@@ -47,7 +43,7 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", default="results/lora_global")
     p.add_argument("--base-prompt", default="anime character portrait, 1girl")
-    p.add_argument("--min-confidence", type=float, default=0.0)
+    p.add_argument("--gradient-checkpointing", action="store_true")
     return p.parse_args()
 
 
@@ -83,18 +79,56 @@ class ExpressionDataset(Dataset):
         return {"pixel_values": pixel_values, "input_ids": input_ids}
 
 
+def add_lora_to_unet(unet: UNet2DConditionModel, rank: int):
+    try:
+        from peft import LoraConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "PEFT is required for global LoRA training. Install it with `pip install peft`."
+        ) from exc
+
+    lora_config = LoraConfig(
+        r=rank,
+        lora_alpha=rank,
+        init_lora_weights="gaussian",
+        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+    )
+    unet.add_adapter(lora_config)
+    trainable = [p for p in unet.parameters() if p.requires_grad]
+    if not trainable:
+        raise RuntimeError("No trainable LoRA parameters found after `unet.add_adapter(...)`.")
+    return trainable
+
+
+def save_lora_weights(pipe: StableDiffusionPipeline, output_dir: Path):
+    try:
+        from peft.utils import get_peft_model_state_dict
+        from diffusers.utils import convert_state_dict_to_diffusers
+    except ImportError as exc:
+        raise RuntimeError(
+            "Saving LoRA weights requires PEFT. Install it with `pip install peft`."
+        ) from exc
+
+    unet_state_dict = get_peft_model_state_dict(pipe.unet)
+    unet_state_dict = convert_state_dict_to_diffusers(unet_state_dict)
+    pipe.save_lora_weights(output_dir, unet_lora_layers=unet_state_dict)
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     pairs = json.loads(Path(args.pairs_json).read_text())
     pairs = [
-        p for p in pairs
+        p
+        for p in pairs
         if p.get("target_emotion") in EMOTION_PROMPTS and Path(p.get("target_path", "")).exists()
     ]
     if not pairs:
@@ -112,63 +146,16 @@ def main():
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
-    def get_hidden_size(name: str) -> int:
-        if name.startswith("mid_block"):
-            return unet.config.block_out_channels[-1]
-        if name.startswith("up_blocks"):
-            block_id = int(name.split(".")[1])
-            return list(reversed(unet.config.block_out_channels))[block_id]
-        if name.startswith("down_blocks"):
-            block_id = int(name.split(".")[1])
-            return unet.config.block_out_channels[block_id]
-        return unet.config.block_out_channels[0]
+    if args.gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
 
-    def build_lora_processor(cls, hidden_size, cross_attention_dim, rank):
-        sig = inspect.signature(cls)
-        kwargs = {}
-        if "hidden_size" in sig.parameters:
-            kwargs["hidden_size"] = hidden_size
-        if "cross_attention_dim" in sig.parameters:
-            kwargs["cross_attention_dim"] = cross_attention_dim
-        if "rank" in sig.parameters:
-            kwargs["rank"] = rank
-        if "lora_rank" in sig.parameters and "rank" not in kwargs:
-            kwargs["lora_rank"] = rank
-        return cls(**kwargs)
-
-    lora_attn_procs = {}
-    for name, attn_processor in unet.attn_processors.items():
-        is_cross_attn = name.endswith("attn2.processor")
-        cross_attention_dim = unet.config.cross_attention_dim if is_cross_attn else None
-        hidden_size = get_hidden_size(name)
-        if isinstance(attn_processor, AttnProcessor2_0):
-            lora_attn_procs[name] = build_lora_processor(
-                LoRAAttnProcessor2_0,
-                hidden_size=hidden_size,
-                cross_attention_dim=cross_attention_dim,
-                rank=args.rank,
-            )
-        else:
-            lora_attn_procs[name] = build_lora_processor(
-                LoRAAttnProcessor,
-                hidden_size=hidden_size,
-                cross_attention_dim=cross_attention_dim,
-                rank=args.rank,
-            )
-    unet.set_attn_processor(lora_attn_procs)
-
-    # Diffusers does not always surface LoRA attention processor params through
-    # unet.parameters(), so wrap them explicitly.
-    lora_layers = AttnProcsLayers(unet.attn_processors)
-    lora_params = list(lora_layers.parameters())
-    if not lora_params:
-        raise RuntimeError("No LoRA parameters found after attaching attention processors.")
+    lora_params = add_lora_to_unet(unet, rank=args.rank)
     optimizer = torch.optim.AdamW(lora_params, lr=args.lr)
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model, subfolder="scheduler")
 
     text_encoder.to(device)
-    vae.to(device)
-    unet.to(device)
+    vae.to(device, dtype=dtype)
+    unet.to(device, dtype=dtype)
     unet.train()
 
     global_step = 0
@@ -176,11 +163,13 @@ def main():
         for batch in dataloader:
             if global_step >= args.max_steps:
                 break
-            pixel_values = batch["pixel_values"].to(device)
+
+            pixel_values = batch["pixel_values"].to(device=device, dtype=dtype)
             input_ids = batch["input_ids"].to(device)
 
             with torch.no_grad():
                 latents = vae.encode(pixel_values).latent_dist.sample() * 0.18215
+
             noise = torch.randn_like(latents)
             timesteps = torch.randint(
                 0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device
@@ -189,6 +178,7 @@ def main():
 
             with torch.no_grad():
                 encoder_hidden_states = text_encoder(input_ids).last_hidden_state
+
             noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
@@ -196,11 +186,17 @@ def main():
             loss.backward()
             optimizer.step()
 
-            if global_step % 200 == 0:
+            if global_step % 100 == 0:
                 print(f"step {global_step} | loss {loss.item():.4f}")
             global_step += 1
 
-    unet.save_attn_procs(output_dir)
+    pipe = StableDiffusionPipeline.from_pretrained(
+        args.pretrained_model,
+        unet=unet,
+        safety_checker=None,
+        torch_dtype=dtype,
+    )
+    save_lora_weights(pipe, output_dir)
     (output_dir / "prompt_template.txt").write_text(args.base_prompt)
     print(f"Saved global LoRA to {output_dir}")
 
