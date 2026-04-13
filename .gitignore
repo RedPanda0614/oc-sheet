@@ -9,4 +9,5 @@ project/data/label_pairs/*
 !project/data/label_pairs/val.json
 project/data/processed/*
 !project/data/processed/faces_emotion.json
-project/results/
+project/results/*
+!project/results/pytorch_lora_weights.safetensors
