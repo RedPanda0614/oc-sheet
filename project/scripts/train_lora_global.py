@@ -19,6 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
+import inspect
 from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0, AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -121,19 +122,34 @@ def main():
             return unet.config.block_out_channels[block_id]
         return unet.config.block_out_channels[0]
 
+    def build_lora_processor(cls, hidden_size, cross_attention_dim, rank):
+        sig = inspect.signature(cls)
+        kwargs = {}
+        if "hidden_size" in sig.parameters:
+            kwargs["hidden_size"] = hidden_size
+        if "cross_attention_dim" in sig.parameters:
+            kwargs["cross_attention_dim"] = cross_attention_dim
+        if "rank" in sig.parameters:
+            kwargs["rank"] = rank
+        if "lora_rank" in sig.parameters and "rank" not in kwargs:
+            kwargs["lora_rank"] = rank
+        return cls(**kwargs)
+
     lora_attn_procs = {}
     for name, attn_processor in unet.attn_processors.items():
         is_cross_attn = name.endswith("attn2.processor")
         cross_attention_dim = unet.config.cross_attention_dim if is_cross_attn else None
         hidden_size = get_hidden_size(name)
         if isinstance(attn_processor, AttnProcessor2_0):
-            lora_attn_procs[name] = LoRAAttnProcessor2_0(
+            lora_attn_procs[name] = build_lora_processor(
+                LoRAAttnProcessor2_0,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_attention_dim,
                 rank=args.rank,
             )
         else:
-            lora_attn_procs[name] = LoRAAttnProcessor(
+            lora_attn_procs[name] = build_lora_processor(
+                LoRAAttnProcessor,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_attention_dim,
                 rank=args.rank,
