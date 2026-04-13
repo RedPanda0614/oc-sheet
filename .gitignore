@@ -1,5 +1,12 @@
 .DS_Store
 project/.DS_Store
 project/.vscode/
-project/data/
+project/data/*
+!project/data/label_pairs/
+!project/data/processed/
+project/data/label_pairs/*
+!project/data/label_pairs/train.json
+!project/data/label_pairs/val.json
+project/data/processed/*
+!project/data/processed/faces_emotion.json
 project/results/
