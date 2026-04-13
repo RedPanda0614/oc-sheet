@@ -31,24 +31,25 @@ python scripts/build_pairs_lora.py \
   --val-ratio 0.2
 ```
 
-## LoRA Baseline (few-shot per character)
+## LoRA Baseline (global expression control)
+This LoRA is trained on all characters with emotion labels, so it can transfer
+to new characters at inference time (prompt-only control).
+
 Train:
 ```bash
-python scripts/train_lora.py \
+python scripts/train_lora_global.py \
   --pairs-json data/lora/pairs/train.json \
-  --sheet-id sheet_00008 \
-  --num-images 8 \
-  --token "<oc>" \
-  --output-dir results/lora
+  --output-dir results/lora_global \
+  --max-steps 5000 \
+  --batch-size 2
 ```
 
 Infer:
 ```bash
-python inference/run_personalized.py \
-  --mode lora \
-  --weights-dir results/lora/sheet_00008 \
-  --token "<oc>" \
-  --output-dir results/lora/sheet_00008/outputs
+python inference/run_lora_global.py \
+  --lora-dir results/lora_global \
+  --reference data/processed/faces/sheet_00008__face00.jpg \
+  --output-dir results/lora_global/outputs
 ```
 
 ## Textual Inversion Baseline (few-shot per character)
