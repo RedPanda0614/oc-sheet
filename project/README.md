@@ -44,7 +44,8 @@ python scripts/train_lora_global.py \
   --pairs-json data/lora/pairs/train.json \
   --output-dir results/lora_global \
   --max-steps 5000 \
-  --batch-size 2
+  --batch-size 2 \
+  --lr 5e-5
 ```
 
 Infer:

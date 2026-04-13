@@ -38,12 +38,13 @@ def parse_args():
     p.add_argument("--resolution", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--max-steps", type=int, default=5000)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--rank", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", default="results/lora_global")
     p.add_argument("--base-prompt", default="anime character portrait, 1girl")
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument("--max-grad-norm", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -97,6 +98,9 @@ def add_lora_to_unet(unet: UNet2DConditionModel, rank: int):
     trainable = [p for p in unet.parameters() if p.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable LoRA parameters found after `unet.add_adapter(...)`.")
+    # Keep LoRA params in fp32 for more stable optimization.
+    for param in trainable:
+        param.data = param.data.float()
     return trainable
 
 
@@ -120,7 +124,12 @@ def main():
     random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        dtype = torch.bfloat16
+    elif torch.cuda.is_available():
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +195,12 @@ def main():
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
             optimizer.zero_grad()
+            if not torch.isfinite(loss):
+                print(f"step {global_step} | non-finite loss {loss.item()}, skipping update")
+                global_step += 1
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(lora_params, args.max_grad_norm)
             optimizer.step()
 
             if global_step % 100 == 0:
