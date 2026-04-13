@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
-from diffusers.models.attention_processor import LoRAAttnProcessor
+from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0, AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
 
 
@@ -110,18 +110,34 @@ def main():
     text_encoder.requires_grad_(False)
     unet.requires_grad_(False)
 
+    def get_hidden_size(name: str) -> int:
+        if name.startswith("mid_block"):
+            return unet.config.block_out_channels[-1]
+        if name.startswith("up_blocks"):
+            block_id = int(name.split(".")[1])
+            return list(reversed(unet.config.block_out_channels))[block_id]
+        if name.startswith("down_blocks"):
+            block_id = int(name.split(".")[1])
+            return unet.config.block_out_channels[block_id]
+        return unet.config.block_out_channels[0]
+
     lora_attn_procs = {}
     for name, attn_processor in unet.attn_processors.items():
-        cross_attention_dim = (
-            attn_processor.cross_attention_dim
-            if hasattr(attn_processor, "cross_attention_dim")
-            else unet.config.cross_attention_dim
-        )
-        lora_attn_procs[name] = LoRAAttnProcessor(
-            hidden_size=attn_processor.hidden_size,
-            cross_attention_dim=cross_attention_dim,
-            rank=args.rank,
-        )
+        is_cross_attn = name.endswith("attn2.processor")
+        cross_attention_dim = unet.config.cross_attention_dim if is_cross_attn else None
+        hidden_size = get_hidden_size(name)
+        if isinstance(attn_processor, AttnProcessor2_0):
+            lora_attn_procs[name] = LoRAAttnProcessor2_0(
+                hidden_size=hidden_size,
+                cross_attention_dim=cross_attention_dim,
+                rank=args.rank,
+            )
+        else:
+            lora_attn_procs[name] = LoRAAttnProcessor(
+                hidden_size=hidden_size,
+                cross_attention_dim=cross_attention_dim,
+                rank=args.rank,
+            )
     unet.set_attn_processor(lora_attn_procs)
 
     lora_params = [p for p in unet.parameters() if p.requires_grad]
