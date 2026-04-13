@@ -10,10 +10,9 @@ This repo supports the Midway baseline pipeline for OC sheet generation.
 
 ## New: CLIP Pseudo-Labeling for Supervised Emotion
 We use CLIP zero-shot to assign an emotion label to each face crop.
-We also merge `sad` and `crying` into a single class: `negative`.
 
 Supported labels for Stage-1:
-`neutral, happy, angry, surprised, negative`
+`neutral, happy, sad, angry, surprised, crying`
 
 ### 1) Label emotions for face crops
 ```bash

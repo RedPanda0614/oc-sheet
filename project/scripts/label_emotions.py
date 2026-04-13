@@ -2,7 +2,6 @@
 CLIP zero-shot emotion labeling for face crops.
 
 Outputs faces_emotion.json with label + confidence.
-Merges sad and crying into a single class: negative.
 """
 
 from __future__ import annotations
@@ -23,11 +22,6 @@ EMOTION_PROMPTS = {
     "surprised": "an anime character portrait with a surprised expression",
     "sad": "an anime character portrait with a sad expression",
     "crying": "an anime character portrait with a crying expression and tears",
-}
-
-MERGE_MAP = {
-    "sad": "negative",
-    "crying": "negative",
 }
 
 
@@ -64,9 +58,8 @@ def main():
             probs = logits.softmax(dim=0)
             best_idx = int(probs.argmax().item())
 
-        raw_label = labels[best_idx]
+        label = labels[best_idx]
         conf = float(probs[best_idx].item())
-        label = MERGE_MAP.get(raw_label, raw_label)
         if conf < args.min_confidence:
             label = "unknown"
 
@@ -76,7 +69,7 @@ def main():
                 "sheet_id": entry.get("sheet_id"),
                 "face_idx": entry.get("face_idx"),
                 "target_emotion": label,
-                "raw_emotion": raw_label,
+                "raw_emotion": label,
                 "confidence": conf,
             }
         )
