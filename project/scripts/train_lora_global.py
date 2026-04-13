@@ -177,7 +177,10 @@ def main():
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             with torch.no_grad():
-                encoder_hidden_states = text_encoder(input_ids).last_hidden_state
+                # Keep text features in the same dtype as the UNet/LoRA weights.
+                encoder_hidden_states = text_encoder(input_ids).last_hidden_state.to(
+                    device=device, dtype=dtype
+                )
 
             noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
