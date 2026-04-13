@@ -19,6 +19,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
+from diffusers.loaders import AttnProcsLayers
 import inspect
 from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0, AttnProcessor2_0
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -156,7 +157,12 @@ def main():
             )
     unet.set_attn_processor(lora_attn_procs)
 
-    lora_params = [p for p in unet.parameters() if p.requires_grad]
+    # Diffusers does not always surface LoRA attention processor params through
+    # unet.parameters(), so wrap them explicitly.
+    lora_layers = AttnProcsLayers(unet.attn_processors)
+    lora_params = list(lora_layers.parameters())
+    if not lora_params:
+        raise RuntimeError("No LoRA parameters found after attaching attention processors.")
     optimizer = torch.optim.AdamW(lora_params, lr=args.lr)
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model, subfolder="scheduler")
 
