@@ -11,17 +11,7 @@ import torch
 from PIL import Image
 from diffusers import StableDiffusionPipeline
 
-
-EMOTION_PROMPTS = {
-    "neutral": "neutral expression",
-    "happy": "happy smiling expression",
-    "sad": "sad expression",
-    "angry": "angry frowning expression",
-    "surprised": "surprised expression",
-    "crying": "crying expression with tears",
-}
-
-NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, worst quality, blurry, deformed, ugly"
+from run_baseline import EMOTION_PROMPTS, NEGATIVE_PROMPT
 
 
 def parse_args():
@@ -33,7 +23,6 @@ def parse_args():
     p.add_argument("--steps", type=int, default=30)
     p.add_argument("--guidance", type=float, default=7.5)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--base-prompt", default="anime character portrait, 1girl")
     return p.parse_args()
 
 
@@ -51,8 +40,7 @@ def main():
     pipe.load_lora_weights(args.lora_dir)
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
-    for emotion, emo_prompt in EMOTION_PROMPTS.items():
-        prompt = f"{args.base_prompt}, {emo_prompt}"
+    for emotion, prompt in EMOTION_PROMPTS.items():
         image = pipe(
             prompt=prompt,
             negative_prompt=NEGATIVE_PROMPT,

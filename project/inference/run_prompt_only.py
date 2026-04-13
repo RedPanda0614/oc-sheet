@@ -2,8 +2,9 @@
 Prompt-only baseline inference.
 
 This baseline compares:
-1. naive prompt-only generation
-2. structured prompt-only generation with character attributes
+1. naive prompt-only generation using the exact prompts from run_baseline.py
+2. structured prompt-only generation that augments those same prompts with
+   character attributes
 
 No reference image is used during generation. This isolates the effect of prompt
 design on expression control and coarse identity consistency.
@@ -18,17 +19,7 @@ from pathlib import Path
 import torch
 from diffusers import StableDiffusionPipeline
 
-
-EMOTION_PHRASES = {
-    "neutral": "neutral expression",
-    "happy": "happy smiling expression",
-    "sad": "sad expression",
-    "angry": "angry frowning expression",
-    "surprised": "surprised expression",
-    "crying": "crying expression with tears",
-}
-
-NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, worst quality, blurry, deformed, ugly"
+from run_baseline import EMOTION_PROMPTS, NEGATIVE_PROMPT
 
 
 def parse_args():
@@ -41,8 +32,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
 
     # Character attributes for structured prompts
-    p.add_argument("--subject", default="anime character portrait")
-    p.add_argument("--gender-token", default="1girl")
     p.add_argument("--hair-color", default="blue hair")
     p.add_argument("--hair-style", default="long hair")
     p.add_argument("--eye-color", default="red eyes")
@@ -53,22 +42,21 @@ def parse_args():
 
 
 def build_naive_prompt(emotion: str, args) -> str:
-    return f"{args.subject}, {args.gender_token}, {EMOTION_PHRASES[emotion]}, high quality"
+    return EMOTION_PROMPTS[emotion]
 
 
 def build_structured_prompt(emotion: str, args) -> str:
+    base_prompt = EMOTION_PROMPTS[emotion]
     parts = [
-        args.subject,
-        args.gender_token,
+        base_prompt,
         args.hair_color,
         args.hair_style,
         args.eye_color,
         args.outfit,
-        EMOTION_PHRASES[emotion],
         args.style_tags,
     ]
     if args.accessories.strip():
-        parts.insert(6, args.accessories)
+        parts.insert(5, args.accessories)
     return ", ".join([part for part in parts if part])
 
 
@@ -98,7 +86,7 @@ def main():
         mode_dir.mkdir(parents=True, exist_ok=True)
         prompts_by_mode[mode] = {}
 
-        for emotion in EMOTION_PHRASES:
+        for emotion in EMOTION_PROMPTS:
             if mode == "naive":
                 prompt = build_naive_prompt(emotion, args)
             else:
