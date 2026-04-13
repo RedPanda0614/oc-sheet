@@ -22,6 +22,7 @@ cuda-bindings==13.2.0
 cuda-pathfinder==1.5.2
 cuda-toolkit==13.0.2
 cycler==0.12.1
+clean-fid==0.1.35
 Cython==3.2.4
 diffusers==0.37.1
 easydict==1.13

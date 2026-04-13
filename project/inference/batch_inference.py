@@ -13,6 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs-json", default="data/pairs/val.json", help="验证集 JSON 路径")
     parser.add_argument("--output-dir", default="results/baseline/batch", help="输出文件夹")
+    parser.add_argument("--manifest-name", default="manifest.json", help="保存评估元数据的 JSON 文件名")
     parser.add_argument("--scale", type=float, default=0.7, help="IP-Adapter 强度")
     parser.add_argument("--sd-path", default="models/sd-v1-5", help="SD 基础模型路径")
     parser.add_argument("--ip-repo-path", default="models/ip-adapter", help="IP-Adapter 仓库路径")
@@ -22,6 +23,7 @@ def parse_args():
 
 def batch_generate(args):
     os.makedirs(args.output_dir, exist_ok=True)
+    manifest_path = os.path.join(args.output_dir, args.manifest_name)
 
     print(f"📖 正在读取数据: {args.pairs_json}")
     with open(args.pairs_json) as f:
@@ -35,6 +37,7 @@ def batch_generate(args):
     pipe, feature_extractor, device = load_all_models(args)
     
     available_emotions = list(EMOTION_PROMPTS.keys())
+    manifest_records = []
 
     print(f"\n🚀 开始批量推理，共需处理 {len(pairs)} 张图...\n")
 
@@ -71,12 +74,29 @@ def batch_generate(args):
             # 命名规则：序号_设定图ID_目标情绪.jpg
             sheet_id = pair.get("sheet_id", "none")
             save_name = f"{i:04d}_{sheet_id}_{target_emotion}.jpg"
-            image.save(os.path.join(args.output_dir, save_name))
+            output_path = os.path.join(args.output_dir, save_name)
+            image.save(output_path)
+
+            manifest_records.append({
+                "index": i,
+                "sheet_id": sheet_id,
+                "reference_path": ref_path,
+                "target_path": pair.get("target_path"),
+                "generated_path": output_path,
+                "requested_label": target_emotion,
+                "label_type": "expression",
+                "seed": 42 + i,
+                "ip_adapter_scale": args.scale,
+            })
             
         except Exception as e:
             tqdm.write(f"❌ 生成失败 {ref_path}: {e}")
 
+    with open(manifest_path, "w") as f:
+        json.dump(manifest_records, f, indent=2, ensure_ascii=False)
+
     print(f"\n✨ 批量跑图完成！全部保存在: {args.output_dir}")
+    print(f"🧾 评估清单已保存: {manifest_path}")
 
 if __name__ == "__main__":
     args = parse_args()
