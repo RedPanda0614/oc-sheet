@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
+from tqdm import tqdm
 
 
 EMOTION_PROMPTS = {
@@ -46,7 +47,7 @@ def main():
     prompts = list(EMOTION_PROMPTS.values())
 
     output = []
-    for entry in faces:
+    for entry in tqdm(faces, desc="Labeling faces"):
         face_path = entry.get("face_path")
         if not face_path or not Path(face_path).exists():
             continue
