@@ -26,6 +26,22 @@ def parse_args():
     return p.parse_args()
 
 
+def detect_lora_weight_name(lora_dir: str | Path) -> str:
+    lora_dir = Path(lora_dir)
+    candidates = [
+        "pytorch_lora_weights.safetensors",
+        "pytorch_lora_weights.bin",
+    ]
+    for name in candidates:
+        if (lora_dir / name).exists():
+            return name
+    existing = sorted(p.name for p in lora_dir.iterdir()) if lora_dir.exists() else []
+    raise FileNotFoundError(
+        f"No LoRA weight file found in {lora_dir}. Expected one of {candidates}. "
+        f"Existing files: {existing}"
+    )
+
+
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -37,7 +53,8 @@ def main():
         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         safety_checker=None,
     ).to(device)
-    pipe.load_lora_weights(args.lora_dir)
+    weight_name = detect_lora_weight_name(args.lora_dir)
+    pipe.load_lora_weights(args.lora_dir, weight_name=weight_name)
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     for emotion, prompt in EMOTION_PROMPTS.items():
