@@ -54,7 +54,10 @@ def load_manifest(manifest_path: str | None, generated_dir: str) -> list[dict]:
         raise FileNotFoundError(
             f"Could not find manifest at {manifest}. Pass --manifest explicitly or generate one first."
         )
-    return json.loads(manifest.read_text())
+    payload = json.loads(manifest.read_text())
+    if isinstance(payload, dict) and "records" in payload:
+        return payload["records"]
+    return payload
 
 
 def build_pair_lookup(pairs: list[dict]) -> tuple[dict[int, dict], dict[str, dict]]:

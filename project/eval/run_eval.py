@@ -62,7 +62,10 @@ def load_manifest(manifest_path: str | None, pairs: list[dict], generated_dir: s
         manifest = gen_dir / "manifest.json"
 
     if manifest.exists():
-        return json.loads(manifest.read_text())
+        payload = json.loads(manifest.read_text())
+        if isinstance(payload, dict) and "records" in payload:
+            return payload["records"]
+        return payload
 
     records = []
     for idx, pair in enumerate(pairs):
