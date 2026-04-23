@@ -20,7 +20,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor
+from transformers import CLIPTextModel, CLIPTokenizer
 
 
 EMOTION_PROMPTS = {
@@ -33,12 +33,51 @@ EMOTION_PROMPTS = {
 }
 
 
+def state_dict_to_cpu(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {k: v.detach().cpu() for k, v in state_dict.items()}
+
+
+def collect_ip_adapter_attn_processor_state(unet) -> dict[str, dict[str, torch.Tensor]]:
+    attn_state = {}
+    for name, proc in unet.attn_processors.items():
+        if not hasattr(proc, "state_dict"):
+            continue
+        proc_state = proc.state_dict()
+        if not proc_state:
+            continue
+        if not any(key.startswith(("to_k_ip", "to_v_ip")) for key in proc_state):
+            continue
+        attn_state[name] = state_dict_to_cpu(proc_state)
+    return attn_state
+
+
+def save_finetuned_ip_adapter(unet, output_dir: Path, args) -> None:
+    if hasattr(unet, "encoder_hid_proj") and unet.encoder_hid_proj is not None:
+        torch.save(state_dict_to_cpu(unet.encoder_hid_proj.state_dict()), output_dir / "image_proj_model.pt")
+
+    attn_state = collect_ip_adapter_attn_processor_state(unet)
+    torch.save(attn_state, output_dir / "ip_attn_procs.pt")
+
+    meta = {
+        "ip_scale": args.ip_scale,
+        "base_prompt": args.base_prompt,
+        "base_ip_adapter_weight": args.ip_weight,
+        "save_format": "diffusers_state_dict_override",
+        "reload_hint": [
+            "Load the base IP-Adapter with pipe.load_ip_adapter(...).",
+            "Load image_proj_model.pt into pipe.unet.encoder_hid_proj.",
+            "Load ip_attn_procs.pt and apply each state_dict to pipe.unet.attn_processors[name].",
+        ],
+    }
+    (output_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--pretrained-model", default="models/sd-v1-5")
     p.add_argument("--ip-repo-path", default="models/ip-adapter")
     p.add_argument("--ip-weight", default="ip-adapter-plus_sd15.bin")
-    p.add_argument("--pairs-json", default="data/lora/pairs/train.json")
+    p.add_argument("--pairs-json", default="data/label_pairs/train.json")
     p.add_argument("--resolution", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--max-steps", type=int, default=2000)
@@ -96,6 +135,7 @@ def main():
     random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_amp = device == "cuda"
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,12 +165,15 @@ def main():
     text_encoder: CLIPTextModel = pipe.text_encoder
     vae: AutoencoderKL = pipe.vae
     unet = pipe.unet
-    image_processor = CLIPImageProcessor.from_pretrained(
-        Path(args.ip_repo_path) / "models" / "image_encoder"
-    )
+    def collate_fn(batch):
+        return {
+            "reference_pil": [b["reference_pil"] for b in batch],
+            "target_pixels": torch.stack([b["target_pixels"] for b in batch]),
+            "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        }
 
     dataset = ExpressionPairDataset(pairs, tokenizer, size=args.resolution, base_prompt=args.base_prompt)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
 
     # Freeze base models
     vae.requires_grad_(False)
@@ -139,12 +182,15 @@ def main():
 
     # Enable gradients for IP-Adapter components
     trainable_params = []
-    if hasattr(pipe, "image_proj_model"):
-        pipe.image_proj_model.requires_grad_(True)
-        trainable_params += list(pipe.image_proj_model.parameters())
+    if hasattr(unet, "encoder_hid_proj") and unet.encoder_hid_proj is not None:
+        unet.encoder_hid_proj.float()
+        unet.encoder_hid_proj.requires_grad_(True)
+        trainable_params += list(unet.encoder_hid_proj.parameters())
 
     # Unfreeze IP-Adapter attention processors if present
     for _, proc in unet.attn_processors.items():
+        if hasattr(proc, "float"):
+            proc.float()
         if hasattr(proc, "requires_grad_"):
             try:
                 proc.requires_grad_(True)
@@ -157,17 +203,18 @@ def main():
         raise RuntimeError("No trainable IP-Adapter parameters found. Check diffusers version.")
 
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model, subfolder="scheduler")
 
     vae.to(device)
     text_encoder.to(device)
     unet.to(device)
-    if hasattr(pipe, "image_proj_model"):
-        pipe.image_proj_model.to(device)
+    if hasattr(pipe, "image_encoder"):
+        pipe.image_encoder.to(device)
 
     unet.train()
-    if hasattr(pipe, "image_proj_model"):
-        pipe.image_proj_model.train()
+    if hasattr(unet, "encoder_hid_proj") and unet.encoder_hid_proj is not None:
+        unet.encoder_hid_proj.train()
 
     global_step = 0
     while global_step < args.max_steps:
@@ -175,7 +222,7 @@ def main():
             if global_step >= args.max_steps:
                 break
 
-            target_pixels = batch["target_pixels"].to(device)
+            target_pixels = batch["target_pixels"].to(device=device, dtype=vae.dtype)
             input_ids = batch["input_ids"].to(device)
 
             # Encode target to latents
@@ -194,35 +241,37 @@ def main():
             ref_pils = batch["reference_pil"]
             if not isinstance(ref_pils, list):
                 ref_pils = list(ref_pils)
-            ip_inputs = image_processor(images=ref_pils, return_tensors="pt").to(device)
-            with torch.no_grad():
-                image_embeds = pipe.image_encoder(ip_inputs.pixel_values).image_embeds
+            image_embeds = pipe.prepare_ip_adapter_image_embeds(
+                ip_adapter_image=[ref_pils],
+                ip_adapter_image_embeds=None,
+                device=device,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=False,
+            )
 
-            # Some diffusers versions expect image_embeds in added_cond_kwargs
-            noise_pred = unet(
-                noisy_latents,
-                timesteps,
-                encoder_hidden_states,
-                added_cond_kwargs={"image_embeds": image_embeds},
-            ).sample
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                noise_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states,
+                    added_cond_kwargs={"image_embeds": image_embeds},
+                ).sample
 
-            loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+
+            scaler.scale(loss).backward()
+            if use_amp:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
 
             if global_step % 200 == 0:
                 print(f"step {global_step} | loss {loss.item():.4f}")
             global_step += 1
 
-    # Save IP-Adapter fine-tuned weights
-    if hasattr(pipe, "image_proj_model"):
-        torch.save(pipe.image_proj_model.state_dict(), output_dir / "image_proj_model.pt")
-    # Save attention processors
-    unet.save_attn_procs(output_dir / "ip_attn_procs")
-    (output_dir / "meta.json").write_text(
-        json.dumps({"ip_scale": args.ip_scale, "base_prompt": args.base_prompt}, indent=2)
-    )
+    save_finetuned_ip_adapter(unet, output_dir, args)
 
     print(f"Saved IP-Adapter fine-tune to {output_dir}")
 
