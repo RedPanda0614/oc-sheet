@@ -83,7 +83,19 @@ def parse_args():
     parser.add_argument("--pairs-json", default="data/label_pairs/train.json")
     parser.add_argument("--resolution", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--max-steps", type=int, default=5000)
+    steps_group = parser.add_mutually_exclusive_group()
+    steps_group.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Train for a fixed number of optimization steps.",
+    )
+    steps_group.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Train for a fixed number of full passes through the dataloader.",
+    )
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=8)
@@ -324,6 +336,24 @@ def main():
         drop_last=True,
         collate_fn=collate_fn,
     )
+    if len(dataloader) == 0:
+        raise RuntimeError(
+            "Dataloader is empty. Increase the dataset size or reduce batch-size."
+        )
+
+    if args.epochs is not None:
+        max_steps = args.epochs * len(dataloader)
+        training_schedule = f"{args.epochs} epoch(s) = {max_steps} step(s)"
+    elif args.max_steps is not None:
+        max_steps = args.max_steps
+        approx_epochs = max_steps / len(dataloader)
+        training_schedule = f"{max_steps} step(s) (~{approx_epochs:.2f} epoch(s))"
+    else:
+        max_steps = 5000
+        approx_epochs = max_steps / len(dataloader)
+        training_schedule = f"default {max_steps} step(s) (~{approx_epochs:.2f} epoch(s))"
+
+    print(f"Training schedule: {training_schedule}")
 
     # Freeze base modules. The trainable parameters will come only from LoRA.
     vae.requires_grad_(False)
@@ -347,9 +377,9 @@ def main():
     unet.train()
 
     global_step = 0
-    while global_step < args.max_steps:
+    while global_step < max_steps:
         for batch in dataloader:
-            if global_step >= args.max_steps:
+            if global_step >= max_steps:
                 break
 
             target_pixels = batch["target_pixels"].to(device=device, dtype=dtype)
