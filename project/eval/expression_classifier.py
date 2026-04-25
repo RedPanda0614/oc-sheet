@@ -22,8 +22,7 @@ EXPRESSION_PROMPTS = {
     "sad": "an anime character portrait with a sad expression",
     "angry": "an anime character portrait with an angry frowning expression",
     "surprised": "an anime character portrait with a surprised expression",
-    "crying": "an anime character portrait with a crying expression and tears",
-    "embarrassed": "an anime character portrait with an embarrassed blushing expression",
+    "crying": "an anime character portrait with a crying expression and tears"
 }
 
 VIEW_PROMPTS = {
