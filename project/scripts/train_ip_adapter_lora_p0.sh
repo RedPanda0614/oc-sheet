@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=oc-iplora-p0
+#SBATCH --account=cis260099p
 #SBATCH --partition=GPU-shared
-#SBATCH --gres=gpu:v100-32:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
+#SBATCH --gpus=v100-32:1
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%j_ip_adapter_lora_p0.log
 #SBATCH --error=logs/%j_ip_adapter_lora_p0.err
