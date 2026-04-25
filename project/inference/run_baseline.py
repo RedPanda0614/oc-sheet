@@ -10,12 +10,11 @@ from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 os.environ["TORCH_SKIP_CHECK_SAFE_SERIALIZATION"] = "True"
 
 EMOTION_PROMPTS = {
-    "happy":       "manga character, smiling, happy expression, 1girl, high quality",
-    "sad":         "manga character, sad expression, teary eyes, 1girl, high quality",
-    "angry":       "manga character, angry expression, frowning, 1girl, high quality",
-    "surprised":   "manga character, surprised expression, wide eyes, 1girl, high quality",
-    "crying":      "manga character, crying, tears, 1girl, high quality",
-    "embarrassed": "manga character, embarrassed, blushing, 1girl, high quality",
+    "happy":       "manga character, smiling, happy expression, high quality",
+    "sad":         "manga character, sad expression, teary eyes, high quality",
+    "angry":       "manga character, angry expression, frowning, high quality",
+    "surprised":   "manga character, surprised expression, wide eyes, high quality",
+    "crying":      "manga character, crying, tears, high quality",
 }
 
 NEGATIVE_PROMPT = "lowres, bad anatomy, bad hands, worst quality, blurry, deformed, ugly"
