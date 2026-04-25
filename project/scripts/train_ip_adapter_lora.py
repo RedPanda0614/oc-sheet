@@ -54,6 +54,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from tqdm.auto import tqdm
 
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -377,6 +378,7 @@ def main():
     unet.train()
 
     global_step = 0
+    progress_bar = tqdm(total=max_steps, desc="ip-adapter-lora-train", unit="step")
     while global_step < max_steps:
         for batch in dataloader:
             if global_step >= max_steps:
@@ -425,15 +427,19 @@ def main():
             if not torch.isfinite(loss):
                 print(f"step {global_step} | non-finite loss {loss.item()}, skipping update")
                 global_step += 1
+                progress_bar.update(1)
                 continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(lora_params, args.max_grad_norm)
             optimizer.step()
 
+            progress_bar.update(1)
+            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
             if global_step % 100 == 0:
                 print(f"step {global_step} | loss {loss.item():.4f}")
             global_step += 1
 
+    progress_bar.close()
     save_lora_weights(pipe, output_dir, args)
     print(f"Saved IP-Adapter-conditioned LoRA to {output_dir}")
 
