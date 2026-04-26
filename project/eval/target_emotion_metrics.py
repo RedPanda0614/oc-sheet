@@ -23,6 +23,11 @@ def parse_args():
     parser.add_argument("--manifest", default=None, help="Optional explicit manifest path")
     parser.add_argument("--output-json", default="results/metrics_target_emotion.json")
     parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument(
+        "--exclude-expression-labels",
+        default="",
+        help="Comma-separated expression labels to remove from target labels and CLIP candidates.",
+    )
     return parser.parse_args()
 
 
@@ -74,6 +79,10 @@ def mean_or_none(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def parse_label_set(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
 def main():
     args = parse_args()
     pairs = load_pairs(args.pairs_json)
@@ -82,7 +91,8 @@ def main():
         records = records[: args.max_samples]
 
     by_index, by_target_path = build_pair_lookup(pairs)
-    evaluator = CLIPControlEvaluator()
+    excluded_expression_labels = parse_label_set(args.exclude_expression_labels)
+    evaluator = CLIPControlEvaluator(exclude_expression_labels=excluded_expression_labels)
 
     detailed_records = []
     correct = 0
@@ -94,7 +104,7 @@ def main():
     per_class_correct = Counter()
     confusion = defaultdict(Counter)
 
-    valid_labels = set(EXPRESSION_PROMPTS.keys())
+    valid_labels = set(EXPRESSION_PROMPTS.keys()) - excluded_expression_labels
 
     for record in records:
         generated_path = resolve_path(record.get("generated_path"))

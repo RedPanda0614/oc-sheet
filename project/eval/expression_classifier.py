@@ -39,14 +39,24 @@ class Prediction:
 
 
 class CLIPControlEvaluator:
-    def __init__(self, model_id: str = "openai/clip-vit-large-patch14"):
+    def __init__(
+        self,
+        model_id: str = "openai/clip-vit-large-patch14",
+        exclude_expression_labels: set[str] | None = None,
+    ):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = CLIPModel.from_pretrained(model_id).to(self.device)
         self.processor = CLIPProcessor.from_pretrained(model_id)
+        excluded = exclude_expression_labels or set()
+        self.expression_prompts = {
+            label: prompt
+            for label, prompt in EXPRESSION_PROMPTS.items()
+            if label not in excluded
+        }
 
     def predict(self, image_path: str | Path, label_type: str = "expression") -> Prediction:
         if label_type == "expression":
-            prompts = EXPRESSION_PROMPTS
+            prompts = self.expression_prompts
         elif label_type == "view":
             prompts = VIEW_PROMPTS
         else:

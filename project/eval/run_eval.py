@@ -34,6 +34,11 @@ def parse_args():
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--skip-fid", action="store_true")
     parser.add_argument("--skip-control", action="store_true")
+    parser.add_argument(
+        "--exclude-expression-labels",
+        default="",
+        help="Comma-separated expression labels to remove from the CLIP candidate label set.",
+    )
     return parser.parse_args()
 
 
@@ -96,9 +101,18 @@ def mean_or_none(values: list[float | None]) -> float | None:
     return sum(present) / len(present) if present else None
 
 
+def parse_label_set(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
 def evaluate_records(records: list[dict], args) -> tuple[list[dict], dict]:
     identity_eval = ArcFaceEvaluator()
-    control_eval = None if args.skip_control else CLIPControlEvaluator()
+    excluded_expression_labels = parse_label_set(args.exclude_expression_labels)
+    control_eval = (
+        None
+        if args.skip_control
+        else CLIPControlEvaluator(exclude_expression_labels=excluded_expression_labels)
+    )
 
     real_paths = []
     fake_paths = []

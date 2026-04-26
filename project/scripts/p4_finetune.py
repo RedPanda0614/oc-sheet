@@ -395,7 +395,7 @@ def get_args():
     parser.add_argument(
         "--anti_copy_weight",
         type=float,
-        default=0.20,
+        default=0.0,
         help="Weight on the hard-negative anti-copy triplet loss.",
     )
     parser.add_argument(
@@ -511,6 +511,7 @@ def main():
         f"\nP4 training: {args.num_steps} steps, lr={args.lr}, "
         f"anti_copy_weight={args.anti_copy_weight}, margin={args.anti_copy_margin}\n"
     )
+    anti_copy_enabled = args.anti_copy_weight > 0.0
 
     unet.train()
     step = 0
@@ -528,18 +529,24 @@ def main():
                 break
 
             target_pixels = batch["target_pixels"].to(device=device, dtype=vae.dtype)
-            reference_pixels = batch["reference_pixels"].to(
-                device=device, dtype=vae.dtype
-            )
+            reference_pixels = None
+            if anti_copy_enabled:
+                reference_pixels = batch["reference_pixels"].to(
+                    device=device, dtype=vae.dtype
+                )
             prompts = batch["prompts"]
             ref_pils = batch["reference_pil"]
-            anti_copy_active = batch["anti_copy_active"].to(device=device)
+            anti_copy_active = None
+            if anti_copy_enabled:
+                anti_copy_active = batch["anti_copy_active"].to(device=device)
 
             with torch.no_grad():
                 target_latents = vae.encode(target_pixels).latent_dist.sample() * 0.18215
-                reference_latents = (
-                    vae.encode(reference_pixels).latent_dist.sample() * 0.18215
-                )
+                reference_latents = None
+                if anti_copy_enabled:
+                    reference_latents = (
+                        vae.encode(reference_pixels).latent_dist.sample() * 0.18215
+                    )
                 noise = torch.randn_like(target_latents)
                 timesteps = torch.randint(
                     0,
@@ -579,16 +586,23 @@ def main():
                 ).sample
 
                 diffusion_loss = masked_mse_loss(noise_pred, noise, soft_mask)
-                pred_x0 = predict_x0_from_model_output(
-                    noisy_latents, noise_pred, timesteps, noise_scheduler
-                )
-                anti_copy_loss, pos_sim, neg_sim, active_count = anti_copy_triplet_loss(
-                    pred_x0,
-                    target_latents,
-                    reference_latents,
-                    anti_copy_active,
-                    args.anti_copy_margin,
-                )
+                anti_copy_loss = diffusion_loss.new_zeros(())
+                pos_sim = diffusion_loss.new_zeros(())
+                neg_sim = diffusion_loss.new_zeros(())
+                active_count = 0
+                if anti_copy_enabled:
+                    pred_x0 = predict_x0_from_model_output(
+                        noisy_latents, noise_pred, timesteps, noise_scheduler
+                    )
+                    anti_copy_loss, pos_sim, neg_sim, active_count = (
+                        anti_copy_triplet_loss(
+                            pred_x0,
+                            target_latents,
+                            reference_latents,
+                            anti_copy_active,
+                            args.anti_copy_margin,
+                        )
+                    )
                 total_loss = diffusion_loss + args.anti_copy_weight * anti_copy_loss
 
             scaler.scale(total_loss).backward()
@@ -671,6 +685,7 @@ def compute_val_loss(
     max_batches: int = 20,
 ):
     unet.eval()
+    anti_copy_enabled = anti_copy_weight > 0.0
     totals = {"total": 0.0, "diffusion": 0.0, "anti_copy": 0.0}
     num_batches = 0
 
@@ -679,13 +694,19 @@ def compute_val_loss(
             break
 
         target_pixels = batch["target_pixels"].to(device=device, dtype=vae.dtype)
-        reference_pixels = batch["reference_pixels"].to(device=device, dtype=vae.dtype)
+        reference_pixels = None
+        if anti_copy_enabled:
+            reference_pixels = batch["reference_pixels"].to(device=device, dtype=vae.dtype)
         prompts = batch["prompts"]
         ref_pils = batch["reference_pil"]
-        anti_copy_active = batch["anti_copy_active"].to(device=device)
+        anti_copy_active = None
+        if anti_copy_enabled:
+            anti_copy_active = batch["anti_copy_active"].to(device=device)
 
         target_latents = vae.encode(target_pixels).latent_dist.sample() * 0.18215
-        reference_latents = vae.encode(reference_pixels).latent_dist.sample() * 0.18215
+        reference_latents = None
+        if anti_copy_enabled:
+            reference_latents = vae.encode(reference_pixels).latent_dist.sample() * 0.18215
         noise = torch.randn_like(target_latents)
         timesteps = torch.randint(
             0,
@@ -719,16 +740,18 @@ def compute_val_loss(
                 added_cond_kwargs={"image_embeds": image_embeds},
             ).sample
             diffusion_loss = masked_mse_loss(noise_pred, noise, soft_mask)
-            pred_x0 = predict_x0_from_model_output(
-                noisy_latents, noise_pred, timesteps, noise_scheduler
-            )
-            anti_copy_loss, _, _, _ = anti_copy_triplet_loss(
-                pred_x0,
-                target_latents,
-                reference_latents,
-                anti_copy_active,
-                anti_copy_margin,
-            )
+            anti_copy_loss = diffusion_loss.new_zeros(())
+            if anti_copy_enabled:
+                pred_x0 = predict_x0_from_model_output(
+                    noisy_latents, noise_pred, timesteps, noise_scheduler
+                )
+                anti_copy_loss, _, _, _ = anti_copy_triplet_loss(
+                    pred_x0,
+                    target_latents,
+                    reference_latents,
+                    anti_copy_active,
+                    anti_copy_margin,
+                )
             total_loss = diffusion_loss + anti_copy_weight * anti_copy_loss
 
         totals["total"] += total_loss.item()
