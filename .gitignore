@@ -11,4 +11,7 @@ project/data/processed/*
 !project/data/processed/faces_emotion.json
 project/results/*
 !project/results/pytorch_lora_weights.safetensors
-project/ip_adapter_finetune/
+project/ip_adapter_finetune/*
+!project/ip_adapter_finetune/image_proj_model.pt
+!project/ip_adapter_finetune/ip_attn_procs.pt
+!project/ip_adapter_finetune/meta.json

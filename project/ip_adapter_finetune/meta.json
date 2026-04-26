@@ -1,0 +1,11 @@
+{
+  "ip_scale": 0.7,
+  "base_prompt": "anime character portrait, 1girl",
+  "base_ip_adapter_weight": "ip-adapter-plus_sd15.bin",
+  "save_format": "diffusers_state_dict_override",
+  "reload_hint": [
+    "Load the base IP-Adapter with pipe.load_ip_adapter(...).",
+    "Load image_proj_model.pt into pipe.unet.encoder_hid_proj.",
+    "Load ip_attn_procs.pt and apply each state_dict to pipe.unet.attn_processors[name]."
+  ]
+}
