@@ -12,15 +12,18 @@ This script implements the proposal's P6 stage:
 
 Design choice
 -------------
-To keep the memory mechanism simple and robust, we represent sheet memory as a
-single collage image built from:
+The original implementation represented sheet memory as a single collage image
+built from the original reference and accepted panels. In practice, feeding a
+multi-face collage back into IP-Adapter can amplify artifacts and harm
+identity preservation. This script therefore supports multiple memory modes:
 
-- the original reference image
-- the most recent accepted panels for the same sheet
+- `collage`: original behavior, kept for reproducibility
+- `latest_panel`: use the most recent accepted panel as the next reference
+- `best_identity`: use the accepted panel most similar to the original reference
+- `rerank_only`: always generate from the original reference and use memory only
+  during reranking
 
-That collage is used as the IP-Adapter reference image for the next panel.
-This gives us a concrete "memory-conditioned" generator without changing the
-underlying SD1.5 + IP-Adapter architecture.
+`rerank_only` is the safest option when sheet-memory drift hurts quality.
 
 Each panel request still uses P5-style reranking:
 - generate 4 candidates
@@ -148,6 +151,18 @@ def parse_args():
         type=int,
         default=4,
         help="Maximum number of images used to build memory: original reference + recent accepted panels.",
+    )
+    parser.add_argument(
+        "--memory-mode",
+        choices=["collage", "latest_panel", "best_identity", "rerank_only"],
+        default="collage",
+        help=(
+            "How sheet memory is used during generation. "
+            "'collage' keeps the original implementation; "
+            "'latest_panel' uses the most recent accepted panel; "
+            "'best_identity' uses the accepted panel closest to the original reference; "
+            "'rerank_only' always generates from the original reference and uses memory only in reranking."
+        ),
     )
     parser.add_argument(
         "--copy-threshold",
@@ -343,6 +358,44 @@ def build_memory_collage(image_paths: list[str | Path], size: int) -> Image.Imag
     return canvas
 
 
+def select_memory_reference_path(
+    base_reference_path: str | Path,
+    accepted_panel_paths: list[str],
+    identity_eval: ArcFaceEvaluator,
+    mode: str,
+) -> str:
+    """
+    Pick a single clean reference image instead of constructing a collage.
+
+    For `rerank_only`, we intentionally keep generation anchored to the
+    original reference and let memory influence only candidate selection.
+    """
+
+    if mode == "rerank_only":
+        return str(base_reference_path)
+
+    if not accepted_panel_paths:
+        return str(base_reference_path)
+
+    if mode == "latest_panel":
+        return accepted_panel_paths[-1]
+
+    if mode == "best_identity":
+        best_path = accepted_panel_paths[-1]
+        best_score = float("-inf")
+        for candidate_path in accepted_panel_paths:
+            try:
+                score = identity_eval.similarity(base_reference_path, candidate_path)
+            except Exception:
+                score = None
+            if score is not None and score > best_score:
+                best_score = float(score)
+                best_path = candidate_path
+        return best_path
+
+    return str(base_reference_path)
+
+
 def compute_mean_metric(metric_fn, anchor_path: str | Path, reference_paths: list[str | Path]) -> float | None:
     values = []
     for reference_path in reference_paths:
@@ -453,7 +506,7 @@ def main():
             target_emotion = panel_request["target_emotion"]
             target_path = panel_request.get("target_path")
 
-            # Build the memory image from the original reference and the most
+            # Build the memory context from the original reference and the most
             # recently accepted panels.
             memory_slots = max(args.max_memory_panels - 1, 0)
             recent_memory_paths = (
@@ -463,14 +516,34 @@ def main():
                 accepted_panel_labels[-memory_slots:] if memory_slots > 0 else []
             )
             memory_image_paths = [base_reference_path] + recent_memory_paths
-            memory_collage = build_memory_collage(
-                memory_image_paths,
-                size=args.memory_image_size,
-            )
-            memory_collage_path = (
-                memory_root / f"{sheet_id}_step{panel_step:02d}_{target_emotion}.jpg"
-            )
-            memory_collage.save(memory_collage_path)
+
+            if args.memory_mode == "collage":
+                memory_image = build_memory_collage(
+                    memory_image_paths,
+                    size=args.memory_image_size,
+                )
+                memory_input_path = (
+                    memory_root / f"{sheet_id}_step{panel_step:02d}_{target_emotion}.jpg"
+                )
+                memory_image.save(memory_input_path)
+                memory_reference_paths_for_manifest = [
+                    str(Path(path).resolve()) for path in memory_image_paths
+                ]
+                memory_reference_labels_for_manifest = ["original_reference"] + recent_memory_labels
+            else:
+                selected_memory_reference = select_memory_reference_path(
+                    base_reference_path=base_reference_path,
+                    accepted_panel_paths=recent_memory_paths,
+                    identity_eval=identity_eval,
+                    mode=args.memory_mode,
+                )
+                memory_image = Image.open(selected_memory_reference).convert("RGB")
+                memory_input_path = Path(selected_memory_reference).resolve()
+                memory_reference_paths_for_manifest = [str(memory_input_path)]
+                if str(memory_input_path) == str(Path(base_reference_path).resolve()):
+                    memory_reference_labels_for_manifest = ["original_reference"]
+                else:
+                    memory_reference_labels_for_manifest = ["selected_memory_panel"]
 
             prompt = EMOTION_PROMPTS[target_emotion]
             candidate_dir = candidates_root / sheet_id / f"step{panel_step:02d}_{target_emotion}"
@@ -485,7 +558,7 @@ def main():
                     image = pipe(
                         prompt=prompt,
                         negative_prompt=NEGATIVE_PROMPT,
-                        ip_adapter_image=[memory_collage],
+                        ip_adapter_image=[memory_image],
                         num_inference_steps=args.steps,
                         guidance_scale=args.guidance,
                         generator=generator,
@@ -585,10 +658,11 @@ def main():
                     "baseline_type": "ip_adapter_p6_sheet_memory",
                     "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
                     "generation_mode": "sheet_memory_with_reranking",
+                    "memory_mode": args.memory_mode,
                     "panel_step": panel_step,
-                    "memory_input_path": str(memory_collage_path.resolve()),
-                    "memory_reference_paths": [str(Path(path).resolve()) for path in memory_image_paths],
-                    "memory_reference_labels": ["original_reference"] + recent_memory_labels,
+                    "memory_input_path": str(memory_input_path),
+                    "memory_reference_paths": memory_reference_paths_for_manifest,
+                    "memory_reference_labels": memory_reference_labels_for_manifest,
                     "num_candidates": args.num_candidates,
                     "selected_candidate_index": best_candidate["candidate_index"],
                     "selected_rerank_score": best_candidate["rerank_score"],
@@ -604,6 +678,7 @@ def main():
             "n_generated_panels": len(manifest_records),
             "num_candidates_per_panel": args.num_candidates,
             "max_memory_panels": args.max_memory_panels,
+            "memory_mode": args.memory_mode,
             "rerank_weights": {
                 "w_expr_hit": args.w_expr_hit,
                 "w_expr_conf": args.w_expr_conf,
