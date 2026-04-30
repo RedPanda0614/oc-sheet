@@ -42,6 +42,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from run_baseline import NEGATIVE_PROMPT, load_all_models
+from batch_inference_cfg_labeled import prepare_reference_cfg_embeds
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,15 @@ def parse_args():
         help="Manifest filename written inside output-dir.",
     )
     parser.add_argument("--scale", type=float, default=0.7, help="IP-Adapter scale during inference.")
+    parser.add_argument(
+        "--image-cfg-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Classifier-free guidance scale applied to the reference-image condition. "
+            "Use 1.10 to run P5 on top of the current best P4 cfg110 setting."
+        ),
+    )
     parser.add_argument("--sd-path", default="models/sd-v1-5", help="Stable Diffusion base model path.")
     parser.add_argument("--ip-repo-path", default="models/ip-adapter", help="Local IP-Adapter repo path.")
     parser.add_argument("--n", type=int, default=500, help="Number of samples to run; 0 means full JSON.")
@@ -122,6 +132,19 @@ def parse_args():
         type=float,
         default=2.0,
         help="Penalty applied if a candidate is flagged as too similar to the reference.",
+    )
+    parser.add_argument(
+        "--skip-target-labels",
+        default="",
+        help=(
+            "Comma-separated target labels to skip during generation. "
+            "Use 'neutral' to match the P4 cfg110 validation subset."
+        ),
+    )
+    parser.add_argument(
+        "--model-tag",
+        default="",
+        help="Optional manifest tag describing the backbone/sampling setting.",
     )
     return parser.parse_args()
 
@@ -263,8 +286,15 @@ def score_candidate_set(candidate_metrics: list[dict], args) -> int:
     return best_idx
 
 
+def parse_label_set(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
 def main():
     args = parse_args()
+    if args.image_cfg_scale <= 0:
+        raise ValueError("--image-cfg-scale must be positive.")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     candidates_root = output_dir / "candidates"
@@ -282,7 +312,8 @@ def main():
     identity_eval = ArcFaceEvaluator()
     control_eval = CLIPControlEvaluator()
 
-    valid_emotions = set(EMOTION_PROMPTS.keys())
+    skipped_target_labels = parse_label_set(args.skip_target_labels)
+    valid_emotions = set(EMOTION_PROMPTS.keys()) - skipped_target_labels
     manifest_records = []
     skipped_invalid_label = 0
     skipped_missing_reference = 0
@@ -312,10 +343,17 @@ def main():
             generator = torch.Generator(device=device).manual_seed(candidate_seed)
 
             try:
+                image_embeds = prepare_reference_cfg_embeds(
+                    pipe=pipe,
+                    reference_image=reference_image,
+                    device=device,
+                    image_cfg_scale=args.image_cfg_scale,
+                )
                 image = pipe(
                     prompt=prompt,
                     negative_prompt=NEGATIVE_PROMPT,
-                    ip_adapter_image=[reference_image],
+                    ip_adapter_image=None,
+                    ip_adapter_image_embeds=image_embeds,
                     num_inference_steps=args.steps,
                     guidance_scale=args.guidance,
                     generator=generator,
@@ -370,6 +408,7 @@ def main():
                     "palette_distance": palette,
                     "copy_score": copied,
                     "copy_violation": bool(copy_flag),
+                    "image_cfg_scale": args.image_cfg_scale,
                 }
             )
 
@@ -396,9 +435,12 @@ def main():
                 "label_type": "expression",
                 "seed": best_candidate["seed"],
                 "ip_adapter_scale": args.scale,
+                "image_cfg_scale": args.image_cfg_scale,
+                "text_guidance_scale": args.guidance,
                 "baseline_type": "ip_adapter_p5_rerank",
+                "model_tag": args.model_tag.strip() or Path(args.checkpoint_dir).name,
                 "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
-                "generation_mode": "strict_ground_truth_label_with_reranking",
+                "generation_mode": "reference_image_cfg_sampling_with_reranking",
                 "num_candidates": args.num_candidates,
                 "selected_candidate_index": best_candidate["candidate_index"],
                 "selected_rerank_score": best_candidate["rerank_score"],
@@ -411,8 +453,10 @@ def main():
             "n_input_pairs": len(pairs),
             "n_generated": len(manifest_records),
             "num_candidates_per_pair": args.num_candidates,
+            "image_cfg_scale": args.image_cfg_scale,
             "skipped_invalid_label": skipped_invalid_label,
             "skipped_missing_reference": skipped_missing_reference,
+            "skipped_target_labels": sorted(skipped_target_labels),
             "rerank_weights": {
                 "w_expr_hit": args.w_expr_hit,
                 "w_expr_conf": args.w_expr_conf,
