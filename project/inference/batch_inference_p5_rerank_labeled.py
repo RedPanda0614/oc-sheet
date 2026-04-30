@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter, ImageStat
 from tqdm import tqdm
 
 from run_baseline import NEGATIVE_PROMPT, load_all_models
@@ -64,6 +64,33 @@ EMOTION_PROMPTS = {
     "surprised": "manga character, surprised expression, wide eyes, 1girl, high quality",
     "crying": "manga character, crying, tears, 1girl, high quality",
     "embarrassed": "manga character, embarrassed, blushing, 1girl, high quality",
+}
+
+FACE_PROMPTS = {
+    "neutral": (
+        "solo, close-up face, anime portrait, neutral calm expression, "
+        "half-lidded eyes, relaxed eyebrows, closed mouth, simple background"
+    ),
+    "happy": (
+        "solo, close-up face, anime portrait, laughing happily, "
+        "eyes curved into crescents, wide smile showing teeth, rosy cheeks, simple background"
+    ),
+    "sad": (
+        "solo, close-up face, anime portrait, sad expression, "
+        "drooping eyes, eyebrows slanted inward, downturned mouth, simple background"
+    ),
+    "angry": (
+        "solo, close-up face, anime portrait, furious angry expression, "
+        "eyes narrowed, eyebrows sharply angled down, clenched teeth, simple background"
+    ),
+    "surprised": (
+        "solo, close-up face, anime portrait, shocked expression, "
+        "eyes wide open and round, eyebrows raised high, open mouth, simple background"
+    ),
+    "crying": (
+        "solo, close-up face, anime portrait, crying expression, "
+        "tears on cheeks, closed eyes, scrunched brows, simple background"
+    ),
 }
 
 CLEAN_PROMPT_SUFFIX = (
@@ -110,6 +137,11 @@ def parse_args():
             "Use 1.10 to run P5 on top of the current best P4 cfg110 setting."
         ),
     )
+    parser.add_argument(
+        "--disable-image-cfg",
+        action="store_true",
+        help="Use the original IP-Adapter image path instead of precomputed reference CFG embeds.",
+    )
     parser.add_argument("--sd-path", default="models/sd-v1-5", help="Stable Diffusion base model path.")
     parser.add_argument("--ip-repo-path", default="models/ip-adapter", help="Local IP-Adapter repo path.")
     parser.add_argument("--n", type=int, default=500, help="Number of samples to run; 0 means full JSON.")
@@ -129,11 +161,11 @@ def parse_args():
     parser.add_argument("--guidance", type=float, default=7.5, help="Classifier-free guidance scale.")
     parser.add_argument(
         "--prompt-style",
-        choices=["default", "clean"],
+        choices=["default", "clean", "face"],
         default="default",
         help=(
-            "Prompt variant. 'clean' adds front-facing, centered-face, plain-background "
-            "constraints and extra negative prompts for side views/background clutter."
+            "Prompt variant. 'clean' appends view/background constraints; "
+            "'face' replaces the base emotion prompts with close-up face prompts."
         ),
     )
     parser.add_argument(
@@ -157,6 +189,16 @@ def parse_args():
     parser.add_argument("--w-id", type=float, default=1.0, help="Weight on identity similarity.")
     parser.add_argument("--w-palette", type=float, default=0.75, help="Weight on palette consistency.")
     parser.add_argument("--w-copy", type=float, default=0.75, help="Weight on lower copy score.")
+    parser.add_argument("--target-view", default="front", help="Desired generated view label for view reranking.")
+    parser.add_argument("--w-view-hit", type=float, default=0.0, help="Weight on exact target-view match.")
+    parser.add_argument("--w-view-conf", type=float, default=0.0, help="Weight on target-view confidence.")
+    parser.add_argument("--w-background", type=float, default=0.0, help="Weight on low background clutter.")
+    parser.add_argument(
+        "--view-mismatch-penalty",
+        type=float,
+        default=0.0,
+        help="Extra penalty when CLIP view prediction does not match --target-view.",
+    )
     parser.add_argument(
         "--copy-violation-penalty",
         type=float,
@@ -260,6 +302,47 @@ def normalize_metric(values: list[float | None], higher_is_better: bool) -> list
     return normalized
 
 
+def background_clutter_score(image_path: str | Path) -> float:
+    """
+    Estimate how much border/background clutter a candidate contains.
+
+    The score focuses on the outer ring because panel borders, speech bubbles,
+    and busy backgrounds usually show up there. Lower is cleaner.
+    """
+
+    image = Image.open(image_path).convert("RGB").resize((128, 128), Image.LANCZOS)
+    border = 18
+    strips = [
+        image.crop((0, 0, 128, border)),
+        image.crop((0, 128 - border, 128, 128)),
+        image.crop((0, border, border, 128 - border)),
+        image.crop((128 - border, border, 128, 128 - border)),
+    ]
+
+    edge_scores = []
+    dark_fractions = []
+    color_std_scores = []
+
+    for strip in strips:
+        gray = strip.convert("L")
+        edge = gray.filter(ImageFilter.FIND_EDGES)
+        edge_scores.append(ImageStat.Stat(edge).mean[0] / 255.0)
+
+        hist = gray.histogram()
+        total = sum(hist) or 1
+        dark_fractions.append(sum(hist[:45]) / total)
+
+        color_std = ImageStat.Stat(strip).stddev
+        color_std_scores.append(min(sum(color_std) / (3.0 * 96.0), 1.0))
+
+    score = (
+        0.50 * sum(edge_scores) / len(edge_scores)
+        + 0.30 * sum(color_std_scores) / len(color_std_scores)
+        + 0.20 * sum(dark_fractions) / len(dark_fractions)
+    )
+    return float(max(0.0, min(score, 1.0)))
+
+
 def score_candidate_set(candidate_metrics: list[dict], args) -> int:
     """
     Score all candidates for a single input pair and return the selected index.
@@ -275,11 +358,16 @@ def score_candidate_set(candidate_metrics: list[dict], args) -> int:
     identities = [metric["identity_similarity"] for metric in candidate_metrics]
     palettes = [metric["palette_distance"] for metric in candidate_metrics]
     copies = [metric["copy_score"] for metric in candidate_metrics]
+    view_hits = [metric["view_hit"] for metric in candidate_metrics]
+    view_conf = [metric["target_view_confidence"] for metric in candidate_metrics]
+    background_clutter = [metric["background_clutter_score"] for metric in candidate_metrics]
 
     expr_conf_norm = normalize_metric(expr_conf, higher_is_better=True)
     id_norm = normalize_metric(identities, higher_is_better=True)
     palette_norm = normalize_metric(palettes, higher_is_better=False)
     copy_norm = normalize_metric(copies, higher_is_better=False)
+    view_conf_norm = normalize_metric(view_conf, higher_is_better=True)
+    background_clean_norm = normalize_metric(background_clutter, higher_is_better=False)
 
     best_idx = 0
     best_key = None
@@ -291,20 +379,29 @@ def score_candidate_set(candidate_metrics: list[dict], args) -> int:
             + args.w_id * id_norm[idx]
             + args.w_palette * palette_norm[idx]
             + args.w_copy * copy_norm[idx]
+            + args.w_view_hit * float(view_hits[idx])
+            + args.w_view_conf * view_conf_norm[idx]
+            + args.w_background * background_clean_norm[idx]
             - args.copy_violation_penalty * float(metric["copy_violation"])
+            - args.view_mismatch_penalty * float(metric["predicted_view"] != args.target_view)
         )
         metric["norm_expression_confidence"] = expr_conf_norm[idx]
         metric["norm_identity_similarity"] = id_norm[idx]
         metric["norm_palette_consistency"] = palette_norm[idx]
         metric["norm_copy_avoidance"] = copy_norm[idx]
+        metric["norm_view_confidence"] = view_conf_norm[idx]
+        metric["norm_background_cleanliness"] = background_clean_norm[idx]
         metric["rerank_score"] = float(rerank_score)
 
         # Keep a deterministic tie-breaker so behavior is stable across runs.
         tie_break_key = (
             rerank_score,
             float(expr_hits[idx]),
+            float(view_hits[idx]),
             metric["prediction_confidence"] if metric["prediction_confidence"] is not None else -1.0,
+            metric["target_view_confidence"] if metric["target_view_confidence"] is not None else -1.0,
             metric["identity_similarity"] if metric["identity_similarity"] is not None else -1.0,
+            -(metric["background_clutter_score"] if metric["background_clutter_score"] is not None else 1e9),
             -(metric["copy_score"] if metric["copy_score"] is not None else 1e9),
             -(metric["palette_distance"] if metric["palette_distance"] is not None else 1e9),
             -idx,
@@ -325,7 +422,10 @@ def join_prompt_parts(*parts: str) -> str:
 
 
 def build_prompt(target_emotion: str, args) -> str:
-    prompt = EMOTION_PROMPTS[target_emotion]
+    if args.prompt_style == "face" and target_emotion in FACE_PROMPTS:
+        prompt = FACE_PROMPTS[target_emotion]
+    else:
+        prompt = EMOTION_PROMPTS[target_emotion]
     if args.prompt_style == "clean":
         prompt = join_prompt_parts(prompt, CLEAN_PROMPT_SUFFIX)
     return join_prompt_parts(prompt, args.prompt_suffix)
@@ -336,6 +436,34 @@ def build_negative_prompt(args) -> str:
     if args.prompt_style == "clean":
         negative_prompt = join_prompt_parts(negative_prompt, CLEAN_NEGATIVE_PROMPT_EXTRA)
     return join_prompt_parts(negative_prompt, args.negative_prompt_extra)
+
+
+def generate_with_reference_condition(pipe, prompt: str, negative_prompt: str, reference_image: Image.Image, args, device: str, generator):
+    if args.disable_image_cfg:
+        return pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            ip_adapter_image=[reference_image],
+            num_inference_steps=args.steps,
+            guidance_scale=args.guidance,
+            generator=generator,
+        ).images[0]
+
+    image_embeds = prepare_reference_cfg_embeds(
+        pipe=pipe,
+        reference_image=reference_image,
+        device=device,
+        image_cfg_scale=args.image_cfg_scale,
+    )
+    return pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        ip_adapter_image=None,
+        ip_adapter_image_embeds=image_embeds,
+        num_inference_steps=args.steps,
+        guidance_scale=args.guidance,
+        generator=generator,
+    ).images[0]
 
 
 def main():
@@ -392,21 +520,15 @@ def main():
             generator = torch.Generator(device=device).manual_seed(candidate_seed)
 
             try:
-                image_embeds = prepare_reference_cfg_embeds(
+                image = generate_with_reference_condition(
                     pipe=pipe,
-                    reference_image=reference_image,
-                    device=device,
-                    image_cfg_scale=args.image_cfg_scale,
-                )
-                image = pipe(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
-                    ip_adapter_image=None,
-                    ip_adapter_image_embeds=image_embeds,
-                    num_inference_steps=args.steps,
-                    guidance_scale=args.guidance,
+                    reference_image=reference_image,
+                    args=args,
+                    device=device,
                     generator=generator,
-                ).images[0]
+                )
             except Exception as exc:
                 tqdm.write(
                     f"Failed to generate candidate {candidate_idx} for {reference_path}: {exc}"
@@ -424,6 +546,19 @@ def main():
                 tqdm.write(f"Expression scoring failed for {candidate_path}: {exc}")
                 predicted_label = None
                 prediction_confidence = None
+
+            try:
+                view_prediction = control_eval.predict(candidate_path, label_type="view")
+                predicted_view = view_prediction.label
+                predicted_view_confidence = view_prediction.confidence
+                target_view_confidence = (
+                    predicted_view_confidence if predicted_view == args.target_view else 0.0
+                )
+            except Exception as exc:
+                tqdm.write(f"View scoring failed for {candidate_path}: {exc}")
+                predicted_view = None
+                predicted_view_confidence = None
+                target_view_confidence = None
 
             try:
                 identity_similarity = identity_eval.similarity(reference_path, candidate_path)
@@ -445,6 +580,12 @@ def main():
                 copied = None
                 copy_flag = False
 
+            try:
+                background_clutter = background_clutter_score(candidate_path)
+            except Exception as exc:
+                tqdm.write(f"Background scoring failed for {candidate_path}: {exc}")
+                background_clutter = None
+
             candidate_metrics.append(
                 {
                     "candidate_index": candidate_idx,
@@ -453,11 +594,18 @@ def main():
                     "predicted_label": predicted_label,
                     "prediction_confidence": prediction_confidence,
                     "expression_hit": float(predicted_label == target_emotion) if predicted_label else 0.0,
+                    "predicted_view": predicted_view,
+                    "predicted_view_confidence": predicted_view_confidence,
+                    "target_view": args.target_view,
+                    "target_view_confidence": target_view_confidence,
+                    "view_hit": float(predicted_view == args.target_view) if predicted_view else 0.0,
+                    "background_clutter_score": background_clutter,
                     "identity_similarity": identity_similarity,
                     "palette_distance": palette,
                     "copy_score": copied,
                     "copy_violation": bool(copy_flag),
                     "image_cfg_scale": args.image_cfg_scale,
+                    "image_cfg_enabled": not args.disable_image_cfg,
                     "prompt": prompt,
                     "negative_prompt": negative_prompt,
                 }
@@ -487,6 +635,7 @@ def main():
                 "seed": best_candidate["seed"],
                 "ip_adapter_scale": args.scale,
                 "image_cfg_scale": args.image_cfg_scale,
+                "image_cfg_enabled": not args.disable_image_cfg,
                 "text_guidance_scale": args.guidance,
                 "prompt_style": args.prompt_style,
                 "prompt": prompt,
@@ -494,7 +643,11 @@ def main():
                 "baseline_type": "ip_adapter_p5_rerank",
                 "model_tag": args.model_tag.strip() or Path(args.checkpoint_dir).name,
                 "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
-                "generation_mode": "reference_image_cfg_sampling_with_reranking",
+                "generation_mode": (
+                    "reference_image_sampling_with_view_background_reranking"
+                    if args.disable_image_cfg
+                    else "reference_image_cfg_sampling_with_reranking"
+                ),
                 "num_candidates": args.num_candidates,
                 "selected_candidate_index": best_candidate["candidate_index"],
                 "selected_rerank_score": best_candidate["rerank_score"],
@@ -508,6 +661,8 @@ def main():
             "n_generated": len(manifest_records),
             "num_candidates_per_pair": args.num_candidates,
             "image_cfg_scale": args.image_cfg_scale,
+            "image_cfg_enabled": not args.disable_image_cfg,
+            "target_view": args.target_view,
             "prompt_style": args.prompt_style,
             "prompt_suffix": args.prompt_suffix,
             "negative_prompt_extra": args.negative_prompt_extra,
@@ -520,7 +675,11 @@ def main():
                 "w_id": args.w_id,
                 "w_palette": args.w_palette,
                 "w_copy": args.w_copy,
+                "w_view_hit": args.w_view_hit,
+                "w_view_conf": args.w_view_conf,
+                "w_background": args.w_background,
                 "copy_violation_penalty": args.copy_violation_penalty,
+                "view_mismatch_penalty": args.view_mismatch_penalty,
             },
         },
         "records": manifest_records,

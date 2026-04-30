@@ -121,7 +121,9 @@ def main():
             if target_path:
                 pair = by_target_path.get(target_path)
 
-        target_emotion = pair.get("target_emotion") if pair else None
+        target_emotion = record.get("ground_truth_target_emotion")
+        if target_emotion not in valid_labels and pair:
+            target_emotion = pair.get("target_emotion")
         if target_emotion not in valid_labels:
             skipped_missing_gt += 1
             continue
