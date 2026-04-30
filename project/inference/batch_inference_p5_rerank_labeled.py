@@ -66,6 +66,17 @@ EMOTION_PROMPTS = {
     "embarrassed": "manga character, embarrassed, blushing, 1girl, high quality",
 }
 
+CLEAN_PROMPT_SUFFIX = (
+    "front-facing portrait, centered face, same camera angle, straight-on view, "
+    "clean plain white background, simple background, single character, head and shoulders"
+)
+
+CLEAN_NEGATIVE_PROMPT_EXTRA = (
+    "side view, profile view, three-quarter view, turned head, tilted head, "
+    "looking away, cropped face, panel border, comic panel, manga panel, speech bubble, "
+    "text, watermark, busy background, detailed background, extra character, multiple people"
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -116,6 +127,25 @@ def parse_args():
     )
     parser.add_argument("--steps", type=int, default=30, help="Diffusion steps per candidate.")
     parser.add_argument("--guidance", type=float, default=7.5, help="Classifier-free guidance scale.")
+    parser.add_argument(
+        "--prompt-style",
+        choices=["default", "clean"],
+        default="default",
+        help=(
+            "Prompt variant. 'clean' adds front-facing, centered-face, plain-background "
+            "constraints and extra negative prompts for side views/background clutter."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-suffix",
+        default="",
+        help="Optional extra text appended to each expression prompt after the selected prompt style.",
+    )
+    parser.add_argument(
+        "--negative-prompt-extra",
+        default="",
+        help="Optional extra negative prompt text appended after the selected prompt style.",
+    )
     parser.add_argument(
         "--copy-threshold",
         type=float,
@@ -290,6 +320,24 @@ def parse_label_set(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def join_prompt_parts(*parts: str) -> str:
+    return ", ".join(part.strip(" ,") for part in parts if part and part.strip(" ,"))
+
+
+def build_prompt(target_emotion: str, args) -> str:
+    prompt = EMOTION_PROMPTS[target_emotion]
+    if args.prompt_style == "clean":
+        prompt = join_prompt_parts(prompt, CLEAN_PROMPT_SUFFIX)
+    return join_prompt_parts(prompt, args.prompt_suffix)
+
+
+def build_negative_prompt(args) -> str:
+    negative_prompt = NEGATIVE_PROMPT
+    if args.prompt_style == "clean":
+        negative_prompt = join_prompt_parts(negative_prompt, CLEAN_NEGATIVE_PROMPT_EXTRA)
+    return join_prompt_parts(negative_prompt, args.negative_prompt_extra)
+
+
 def main():
     args = parse_args()
     if args.image_cfg_scale <= 0:
@@ -330,7 +378,8 @@ def main():
             skipped_missing_reference += 1
             continue
 
-        prompt = EMOTION_PROMPTS[target_emotion]
+        prompt = build_prompt(target_emotion, args)
+        negative_prompt = build_negative_prompt(args)
         reference_image = Image.open(reference_path).convert("RGB")
         sample_prefix = f"{sample_idx:04d}_{pair.get('sheet_id', 'none')}_{target_emotion}"
         candidate_dir = candidates_root / sample_prefix
@@ -351,7 +400,7 @@ def main():
                 )
                 image = pipe(
                     prompt=prompt,
-                    negative_prompt=NEGATIVE_PROMPT,
+                    negative_prompt=negative_prompt,
                     ip_adapter_image=None,
                     ip_adapter_image_embeds=image_embeds,
                     num_inference_steps=args.steps,
@@ -409,6 +458,8 @@ def main():
                     "copy_score": copied,
                     "copy_violation": bool(copy_flag),
                     "image_cfg_scale": args.image_cfg_scale,
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
                 }
             )
 
@@ -437,6 +488,9 @@ def main():
                 "ip_adapter_scale": args.scale,
                 "image_cfg_scale": args.image_cfg_scale,
                 "text_guidance_scale": args.guidance,
+                "prompt_style": args.prompt_style,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
                 "baseline_type": "ip_adapter_p5_rerank",
                 "model_tag": args.model_tag.strip() or Path(args.checkpoint_dir).name,
                 "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
@@ -454,6 +508,9 @@ def main():
             "n_generated": len(manifest_records),
             "num_candidates_per_pair": args.num_candidates,
             "image_cfg_scale": args.image_cfg_scale,
+            "prompt_style": args.prompt_style,
+            "prompt_suffix": args.prompt_suffix,
+            "negative_prompt_extra": args.negative_prompt_extra,
             "skipped_invalid_label": skipped_invalid_label,
             "skipped_missing_reference": skipped_missing_reference,
             "skipped_target_labels": sorted(skipped_target_labels),
