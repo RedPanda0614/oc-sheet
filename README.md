@@ -115,16 +115,6 @@ python inference/batch_lora_global_labeled.py \
 python inference/batch_inference_labeled.py
 ```
 
-**Baseline results (n=500 val pairs):**
-
-| | Identity ↑ | Expr. Acc. ↑ | Palette ↓ | FID ↓ |
-|---|---|---|---|---|
-| Prompt-only | — | — | — | — |
-| Global LoRA | — | — | — | — |
-| IP-Adapter (P0) | **0.509** | 0.432 | **19.1** | 66.0 |
-
----
-
 ## Our Methods
 
 We build on IP-Adapter Plus and fine-tune it progressively.
@@ -201,16 +191,6 @@ python inference/batch_inference_p5_rerank_labeled.py \
   --n_candidates 4 \
   --output-dir  results/p5
 ```
-
-**P5 results (on top of P4, n=500):**
-
-| | Identity ↑ | Expr. Acc. ↑ | Palette ↓ | FID ↓ |
-|---|---|---|---|---|
-| IP-Adapter P0 | 0.509 | 0.432 | 19.1 | 66.0 |
-| P3 | 0.455 | 0.398 | 20.3 | 64.2 |
-| **P4 + P5** | **0.492** | **0.706** | **19.3** | **64.4** |
-
-P5 reranking gives the largest single gain: expression accuracy jumps from ~0.43 to **0.706** with no additional training.
 
 ---
 
