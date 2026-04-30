@@ -19,15 +19,18 @@ from run_baseline import EMOTION_PROMPTS, NEGATIVE_PROMPT
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pairs-json", default="data/lora/pairs/val.json", help="带 target_emotion 标签的验证集 JSON")
+    parser.add_argument("--pairs-json", default="data/lora/pairs/val.json",
+                        help="labeled validation set JSON with target_emotion")
     parser.add_argument("--pretrained-model", default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--lora-dir", required=True)
-    parser.add_argument("--output-dir", default="results/lora_global/batch_labeled", help="输出文件夹")
-    parser.add_argument("--manifest-name", default="manifest.json", help="评估元数据 JSON 文件名")
+    parser.add_argument("--output-dir", default="results/lora_global/batch_labeled",
+                        help="output directory")
+    parser.add_argument("--manifest-name", default="manifest.json",
+                        help="evaluation manifest JSON filename")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--guidance", type=float, default=7.5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n", type=int, default=500, help="测试数量，设为 0 表示跑完整个 JSON")
+    parser.add_argument("--n", type=int, default=500, help="number of samples (0 = all)")
     return parser.parse_args()
 
 

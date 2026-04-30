@@ -22,13 +22,17 @@ from run_baseline import EMOTION_PROMPTS, NEGATIVE_PROMPT, load_all_models
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pairs-json", default="data/lora/pairs/val.json", help="带 target_emotion 标签的验证集 JSON")
-    parser.add_argument("--output-dir", default="results/baseline/batch_labeled", help="输出文件夹")
-    parser.add_argument("--manifest-name", default="manifest.json", help="评估元数据 JSON 文件名")
-    parser.add_argument("--scale", type=float, default=0.7, help="IP-Adapter 强度")
-    parser.add_argument("--sd-path", default="models/sd-v1-5", help="SD 基础模型路径")
-    parser.add_argument("--ip-repo-path", default="models/ip-adapter", help="IP-Adapter 仓库路径")
-    parser.add_argument("--n", type=int, default=500, help="测试数量，设为 0 表示跑完整个 JSON")
+    parser.add_argument("--pairs-json", default="data/lora/pairs/val.json",
+                        help="labeled validation set JSON with target_emotion")
+    parser.add_argument("--output-dir", default="results/baseline/batch_labeled",
+                        help="output directory")
+    parser.add_argument("--manifest-name", default="manifest.json",
+                        help="evaluation manifest JSON filename")
+    parser.add_argument("--scale", type=float, default=0.7, help="IP-Adapter scale")
+    parser.add_argument("--sd-path", default="models/sd-v1-5", help="SD base model path")
+    parser.add_argument("--ip-repo-path", default="models/ip-adapter",
+                        help="IP-Adapter repo path")
+    parser.add_argument("--n", type=int, default=500, help="number of samples (0 = all)")
     return parser.parse_args()
 
 
@@ -74,7 +78,7 @@ def main():
                 generator=generator,
             ).images[0]
         except Exception as exc:
-            tqdm.write(f"❌ 生成失败 {ref_path}: {exc}")
+            tqdm.write(f"Failed {ref_path}: {exc}")
             continue
 
         sheet_id = pair.get("sheet_id", "none")
