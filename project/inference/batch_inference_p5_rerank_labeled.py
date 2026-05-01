@@ -1,26 +1,4 @@
 """
-Batch inference for P5 reranking on top of a fine-tuned IP-Adapter checkpoint.
-
-Purpose
--------
-This script implements the proposal's P5 stage:
-
-1. load a fine-tuned reference-guided IP-Adapter checkpoint (typically P4)
-2. generate multiple candidates per input pair (default: 4)
-3. score each candidate for:
-   - expression correctness / confidence
-   - identity similarity
-   - palette consistency
-   - copy avoidance
-4. select the best candidate automatically
-
-Why this file exists
---------------------
-We keep reranking as a standalone inference entrypoint so that:
-- P1/P3/P4 training scripts stay unchanged
-- zero-shot and single-sample baselines stay unchanged
-- P5 can be evaluated with the same manifest / eval format as earlier runs
-
 Output
 ------
 The output directory contains:
